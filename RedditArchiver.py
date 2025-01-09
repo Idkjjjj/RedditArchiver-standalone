@@ -4,11 +4,10 @@ from anytree import util as anytree_util
 import praw, prawcore, markdown2, yaml, colored
 
 # stdlib
-import datetime, os, sys, argparse, re
+import datetime, os, sys, argparse, re, json
 
 __NAME__ = "RedditArchiver-standalone"
 __VERSION__ = "2.0.2"
-
 
 # -------------------------- #
 # Arguments                  #
@@ -32,10 +31,12 @@ parser_g2.add_argument('-o', '--output', help='output directory (default: curren
 parser_g2.add_argument('-q', '--quiet', help='will not generate any message (except for errors)', action='store_true')
 parser_g2.add_argument('-h', '--help', action='help', help='Show this help message and exit')
 
+# New argument for downloading a subreddit
+parser.add_argument('--download-subreddit', metavar='SUBREDDIT_NAME', help='Download the top 1500 posts from a given subreddit of the past year.')
+
 # Advanced arguments (normally hidden)
 parser.add_argument('--disable-recursion-limit', help=argparse.SUPPRESS, action='store_true')
 args = parser.parse_args()
-
 
 # -------------------------- #
 # Functions                  #
@@ -54,7 +55,6 @@ def extract_id(url):
         if result is not None:
             return result.group(1)
 
-
 def connect():
     """
     Initiates and tests the connection to Reddit.
@@ -62,7 +62,6 @@ def connect():
     reddit = praw.Reddit(client_id=config['reddit']['client-id'], client_secret=config['reddit']['client-secret'], refresh_token=config['reddit']['refresh-token'], user_agent=f"{__NAME__} v{__VERSION__} by /u/ailothaen")
     reddit.auth.scopes()
     return reddit
-
 
 def get_saved_submissions(extended=False, limit=1000):
     """
@@ -78,7 +77,6 @@ def get_saved_submissions(extended=False, limit=1000):
 
     return submission_ids
 
-
 def get_upvoted_submissions(limit=1000):
     """
     Retrieves the list of upvoted submissions IDs of the authenticated user.
@@ -88,9 +86,8 @@ def get_upvoted_submissions(limit=1000):
         # Reddit seemingly does not give upvoted comments
         if item.name[0:2] == "t3":
             submission_ids.append(item.id)
-    
-    return submission_ids
 
+    return submission_ids
 
 def get_posted_submissions(author=None, extended=False, limit=1000):
     """
@@ -102,7 +99,7 @@ def get_posted_submissions(author=None, extended=False, limit=1000):
         user = reddit.user.me()
     else:
         user = reddit.redditor(author)
-    
+
     if extended:
         for item in user.submissions.new(limit=limit*2):
             submission_ids.append([item.id, item.created_utc])
@@ -115,17 +112,16 @@ def get_posted_submissions(author=None, extended=False, limit=1000):
     else:
         for item in user.submissions.new(limit=limit):
             submission_ids.append(item.id)
-    
-    return submission_ids
 
+    return submission_ids
 
 def comment_parser(initial_text):
     """
     Parses Reddit's pseudo-markdown into HTML formatting
     """
     # removing HTML characters
-    text = initial_text.replace('<', '&lt;')
-    text = text.replace('>', '&gt;')
+    text = initial_text.replace('<', '<')
+    text = text.replace('>', '>')
 
     # transforming markdown to HTML
     text = markdown2.markdown(text)
@@ -133,22 +129,20 @@ def comment_parser(initial_text):
     # converting linebreaks to HTML
     text = text.replace('\n\n', '</p><p>')
     text = text.replace('\n', '<br>')
-    
+
     # removing the last <br> that is here for a weird reason
     if text[-4:] == '<br>':
         text = text[:-4]
 
     return text
 
-
 def get_submission(reddit, submission_id):
     """
-    Retrieves submission object 
+    Retrieves submission object
     """
     submission = reddit.submission(id=submission_id)
     nb_replies = submission.num_comments
     return submission, nb_replies
-
 
 def download_submission(submission, submission_id):
     """
@@ -168,7 +162,7 @@ def download_submission(submission, submission_id):
     submission.comments.replace_more(limit=None)
 
     # Filling index and forest
-    comment_queue = submission.comments[:] 
+    comment_queue = submission.comments[:]
     while comment_queue:
         comment = comment_queue.pop(0)
         comments_index['t1_'+comment.id] = Node('t1_'+comment.id, parent=comments_index[comment.parent_id])
@@ -176,7 +170,6 @@ def download_submission(submission, submission_id):
         comment_queue.extend(comment.replies)
 
     return submission, comments_index, comments_forest
-
 
 def generate_html(submission, submission_id, now_str, sort, comments_index, comments_forest):
     """
@@ -257,7 +250,7 @@ def generate_html(submission, submission_id, now_str, sort, comments_index, comm
 
         # Adding the comment to the list
         html_comments += f"""<header><a href="{config['reddit']['root']}/u/{comments_forest[current_comment_id]['a']}">{comments_forest[current_comment_id]['a']}</a>, on <a href="{config['reddit']['root']}{comments_forest[current_comment_id]['l']}">{time_comment_str}</a> ({comments_forest[current_comment_id]['s']}{'' if comments_forest[current_comment_id]['e'] is False else ', edited'}) <a href="#{parent}" class="n P">▣</a> <a href="#{previous_sibling}" class="n A{previous_sibling_d}">🠉</a> <a href="#{next_sibling}" class="n B{next_sibling_d}">🠋</a> <a href="#{current_comment_id}" class="n S">◯</a></header>{comment_parser(comments_forest[current_comment_id]['b'])}"""
-        
+
         previous_comment_level = current_comment_level
         comment_counter += 1
 
@@ -268,7 +261,6 @@ def generate_html(submission, submission_id, now_str, sort, comments_index, comm
     html_total = html_head+html_submission+html_firstpost+html_comments+html_js
 
     return html_total
-
 
 def write_file(content, submission, now, output_directory):
     """
@@ -288,6 +280,47 @@ def write_file(content, submission, now, output_directory):
 
     return filename
 
+def download_subreddit_posts(reddit, subreddit_name, num_posts=1500):
+    """
+    Downloads the top posts from a given subreddit for the past year and saves them to a JSON file.
+
+    Args:
+        reddit (praw.Reddit): An authenticated PRAW Reddit instance.
+        subreddit_name (str): The name of the subreddit to download from (e.g., "python").
+        num_posts (int): The number of top posts to download (default is 1500).
+    """
+    try:
+        subreddit = reddit.subreddit(subreddit_name)
+        print(f"[i] Downloading the top {num_posts} posts from r/{subreddit_name} (year)...")
+        posts_data = []
+        count = 0
+        for post in subreddit.top(time_filter='year', limit=num_posts):
+            post_info = {
+                "title": post.title,
+                "author": str(post.author),
+                "score": post.score,
+                "url": post.url,
+                "created_utc": post.created_utc,
+                "num_comments": post.num_comments,
+                "upvote_ratio": post.upvote_ratio,
+                "id": post.id,
+                "permalink": "https://www.reddit.com" + post.permalink
+                # Add more attributes if needed
+            }
+            posts_data.append(post_info)
+            count += 1
+            if count % 50 == 0:
+                print(f"[i] Downloaded {count}/{num_posts} posts...")
+
+        filename = f"{subreddit_name}_top_{num_posts}_year.json"
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(posts_data, f, indent=4)
+        print(f"[=] Data saved to '{filename}'")
+
+    except prawcore.exceptions.NotFound:
+        print(f"[x] Subreddit '{subreddit_name}' not found.")
+    except Exception as e:
+        print(f"[x] An error occurred during subreddit download: {e}")
 
 def myprint(message, color, stderr=False):
     """
@@ -301,7 +334,6 @@ def myprint(message, color, stderr=False):
         else:
             print(f"{colored.fg(color)}{message}{colored.attr(0)}")
 
-
 # -------------------------- #
 # Config loading             #
 # -------------------------- #
@@ -313,144 +345,146 @@ except:
     myprint(f"[x] Cannot load config file. Make sure it exists and the syntax is correct.", 9, True)
     raise SystemExit(1)
 
-
 # -------------------------- #
 # Main function              #
 # -------------------------- #
 
-try:
-    now = datetime.datetime.now(datetime.timezone.utc)
-    now_str = now.strftime(config["defaults"]["dateformat"])
-
-    # Test connection
+if __name__ == "__main__":
     try:
-        reddit = connect()
-    except:
-        myprint(f"[x] It looks like you are not authenticated well.", 9, True)
-        myprint(f"[x] Please check your credentials and retry.", 9, True)
-        raise SystemExit(1)
+        # Test connection
+        try:
+            reddit = connect()
+        except Exception as e:
+            myprint(f"[x] It looks like you are not authenticated well: {e}", 9, True)
+            myprint(f"[x] Please check your credentials and retry.", 9, True)
+            raise SystemExit(1)
 
+        if args.download_subreddit:
+            download_subreddit_posts(reddit, args.download_subreddit)
+            sys.exit(0) # Exit after downloading subreddit if that's the only task
 
-    # Getting the list of submissions IDs from arguments
-    submission_id_list = []
+        now = datetime.datetime.now(datetime.timezone.utc)
+        now_str = now.strftime(config["defaults"]["dateformat"])
 
-    if args.id:
-        for url in args.id:
-            submission_id = extract_id(url)
-            if submission_id is None:
-                myprint(f'[x] The URL or ID "{url}" looks incorrect. Please check it.', 9, True)
-                raise SystemExit(1)
-            else:
-                submission_id_list.append(submission_id)
-    
-    if args.file:
-        for filename in args.file:
-            with open(filename, "r") as f:
-                urls_in_file = f.read().splitlines()
+        # Getting the list of submissions IDs from arguments
+        submission_id_list = []
 
-            for url in urls_in_file:
+        if args.id:
+            for url in args.id:
                 submission_id = extract_id(url)
                 if submission_id is None:
-                    myprint(f'[x] The URL or ID "{url}" in "{filename}" looks incorrect. Please check it.', 9, True)
+                    myprint(f'[x] The URL or ID "{url}" looks incorrect. Please check it.', 9, True)
                     raise SystemExit(1)
                 else:
                     submission_id_list.append(submission_id)
 
-    if args.saved or args.saved_extended:
-        try:
-            saved_submissions = get_saved_submissions(extended=args.saved_extended, limit=args.limit)
-            submission_id_list.extend(saved_submissions)
-        except prawcore.exceptions.InsufficientScope:
-            myprint(f'[x] Unable to get your list of saved submissions. That usually means that you did not grant RedditArchiver enough access to your account.', 9, True)
-            myprint(f'[x] Please get a new refresh token, making sure to allow the following scopes: read, history, identity', 9, True)
-        else:
-            myprint(f'[i] {len(saved_submissions)} saved submissions found.', 14)
+        if args.file:
+            for filename in args.file:
+                with open(filename, "r") as f:
+                    urls_in_file = f.read().splitlines()
 
-    if args.author:
-        for author in args.author:
+                for url in urls_in_file:
+                    submission_id = extract_id(url)
+                    if submission_id is None:
+                        myprint(f'[x] The URL or ID "{url}" in "{filename}" looks incorrect. Please check it.', 9, True)
+                        raise SystemExit(1)
+                    else:
+                        submission_id_list.append(submission_id)
+
+        if args.saved or args.saved_extended:
             try:
-                posted_submissions = get_posted_submissions(author, extended=False, limit=args.limit)
-            except prawcore.exceptions.NotFound:
-                myprint(f'[x] User "{author if author else "<yourself>"}" was not found.', 9, True)
+                saved_submissions = get_saved_submissions(extended=args.saved_extended, limit=args.limit)
+                submission_id_list.extend(saved_submissions)
+            except prawcore.exceptions.InsufficientScope:
+                myprint(f'[x] Unable to get your list of saved submissions. That usually means that you did not grant RedditArchiver enough access to your account.', 9, True)
+                myprint(f'[x] Please get a new refresh token, making sure to allow the following scopes: read, history, identity', 9, True)
             else:
-                myprint(f'[i] {len(posted_submissions)} submissions found on user "{author if author else "<yourself>"}".', 14)
-                submission_id_list.extend(posted_submissions)
+                myprint(f'[i] {len(saved_submissions)} saved submissions found.', 14)
 
-    if args.author_extended:
-        for author in args.author_extended:
-            try:
-                posted_submissions = get_posted_submissions(author, extended=True, limit=args.limit)
-            except prawcore.exceptions.NotFound:
-                myprint(f'[x] User "{author if author else "<yourself>"}" was not found.', 9, True)
-            else:
-                myprint(f'[i] {len(posted_submissions)} submissions found on user "{author if author else "<yourself>"}".', 14)
-                submission_id_list.extend(posted_submissions)
-
-    if args.upvoted:
-        try:
-            upvoted_submissions = get_upvoted_submissions(limit=args.limit)
-            submission_id_list.extend(upvoted_submissions)
-        except prawcore.exceptions.InsufficientScope:
-            myprint(f'[x] Unable to get your list of upvoted submissions. That usually means that you did not grant RedditArchiver enough access to your account.', 9, True)
-            myprint(f'[x] Please get a new refresh token, making sure to allow the following scopes: read, history, identity', 9, True)
-        else:
-            myprint(f'[i] {len(upvoted_submissions)} upvoted submissions found.', 14)
-
-
-    # Downloading each submission
-    submission_id_list = list(dict.fromkeys(submission_id_list)) # removing duplicates
-    if len(submission_id_list) == 0:
-        myprint(f'[=] Nothing to download.', 10)
-        raise SystemExit(0)
-    else:
-        myprint(f'[i] {len(submission_id_list)} submissions to download', 14)
-
-    for submission_id in submission_id_list: 
-        try:
-            # "Connecting" to submission and getting information
-            submission, nb_replies = get_submission(reddit, submission_id)
-            myprint(f'[+] Submission {submission_id} found ("{submission.title}" on r/{submission.subreddit.display_name}, {nb_replies} replies), beginning download', 8)
-
-            # Getting the comment list and comment forest
-            submission, comments_index, comments_forest = download_submission(submission, submission_id)
-        except prawcore.exceptions.NotFound:
-            myprint(f"[x] The submission {submission_id} was not found.", 9, True)
-            continue
-        except prawcore.exceptions.Forbidden:
-            myprint(f"[x] Not allowed to access the submission {submission_id}. That usually means the submission is on a private subreddit you do not have access to.", 9, True)
-            continue
-        else:
-            myprint(f"[+] Submission downloaded.", 8)
-
-        # Generating HTML structure
-        while True: # allows to retry
-            try:
-                html = generate_html(submission, submission_id, now_str, None, comments_index, comments_forest)
-            except RecursionError:
-                if args.disable_recursion_limit:
-                    sys.setrecursionlimit(sys.getrecursionlimit()*2)
+        if args.author:
+            for author in args.author:
+                try:
+                    posted_submissions = get_posted_submissions(author, extended=False, limit=args.limit)
+                except prawcore.exceptions.NotFound:
+                    myprint(f'[x] User "{author if author else "<yourself>"}" was not found.', 9, True)
                 else:
-                    myprint(f"[x] The HTML structure could not be generated because the structure of the replies is going too deep for the program to handle.", 9, True)
-                    myprint(f"[x] If you really want to save that thread, pass the --disable-recursion-limit option. Please note however that this might lead to crashing the program.", 9, True)
-                    raise SystemExit(1)
+                    myprint(f'[i] {len(posted_submissions)} submissions found on user "{author if author else "<yourself>"}".', 14)
+                    submission_id_list.extend(posted_submissions)
+
+        if args.author_extended:
+            for author in args.author_extended:
+                try:
+                    posted_submissions = get_posted_submissions(author, extended=True, limit=args.limit)
+                except prawcore.exceptions.NotFound:
+                    myprint(f'[x] User "{author if author else "<yourself>"}" was not found.', 9, True)
+                else:
+                    myprint(f'[i] {len(posted_submissions)} submissions found on user "{author if author else "<yourself>"}".', 14)
+                    submission_id_list.extend(posted_submissions)
+
+        if args.upvoted:
+            try:
+                upvoted_submissions = get_upvoted_submissions(limit=args.limit)
+                submission_id_list.extend(upvoted_submissions)
+            except prawcore.exceptions.InsufficientScope:
+                myprint(f'[x] Unable to get your list of upvoted submissions. That usually means that you did not grant RedditArchiver enough access to your account.', 9, True)
+                myprint(f'[x] Please get a new refresh token, making sure to allow the following scopes: read, history, identity', 9, True)
             else:
-                break
+                myprint(f'[i] {len(upvoted_submissions)} upvoted submissions found.', 14)
 
-        myprint(f"[+] Submission structured.", 8)
+        # Downloading each submission
+        submission_id_list = list(dict.fromkeys(submission_id_list)) # removing duplicates
+        if len(submission_id_list) == 0 and not args.download_subreddit:
+            myprint(f'[=] Nothing to download.', 10)
+            raise SystemExit(0)
+        elif len(submission_id_list) > 0:
+            myprint(f'[i] {len(submission_id_list)} submissions to download', 14)
 
-        # Saving to disk
-        try:
-            filename = write_file(html, submission, now, args.output)
-        except PermissionError as e:
-            myprint(f"[x] Could not write file because of bad permissions.", 9, True)
-            raise SystemExit(1)
-        except Exception as e:
-            myprint(f"[x] Uncaught problem when writing the file: {e}", 9, True)
-            raise SystemExit(1)
+        for submission_id in submission_id_list:
+            try:
+                # "Connecting" to submission and getting information
+                submission, nb_replies = get_submission(reddit, submission_id)
+                myprint(f'[+] Submission {submission_id} found ("{submission.title}" on r/{submission.subreddit.display_name}, {nb_replies} replies), beginning download', 8)
 
-        myprint(f"[=] Submission saved! Filename: {filename}", 10)
+                # Getting the comment list and comment forest
+                submission, comments_index, comments_forest = download_submission(submission, submission_id)
+            except prawcore.exceptions.NotFound:
+                myprint(f"[x] The submission {submission_id} was not found.", 9, True)
+                continue
+            except prawcore.exceptions.Forbidden:
+                myprint(f"[x] Not allowed to access the submission {submission_id}. That usually means the submission is on a private subreddit you do not have access to.", 9, True)
+                continue
+            else:
+                myprint(f"[+] Submission downloaded.", 8)
 
-except Exception as e:
-    # general catch
-    myprint(f"[x] Uncaught problem: {e}", 9, True)
-    raise
+            # Generating HTML structure
+            while True: # allows to retry
+                try:
+                    html = generate_html(submission, submission_id, now_str, None, comments_index, comments_forest)
+                except RecursionError:
+                    if args.disable_recursion_limit:
+                        sys.setrecursionlimit(sys.getrecursionlimit()*2)
+                    else:
+                        myprint(f"[x] The HTML structure could not be generated because the structure of the replies is going too deep for the program to handle.", 9, True)
+                        myprint(f"[x] If you really want to save that thread, pass the --disable-recursion-limit option. Please note however that this might lead to crashing the program.", 9, True)
+                        raise SystemExit(1)
+                else:
+                    break
+
+            myprint(f"[+] Submission structured.", 8)
+
+            # Saving to disk
+            try:
+                filename = write_file(html, submission, now, args.output)
+            except PermissionError as e:
+                myprint(f"[x] Could not write file because of bad permissions.", 9, True)
+                raise SystemExit(1)
+            except Exception as e:
+                myprint(f"[x] Uncaught problem when writing the file: {e}", 9, True)
+                raise SystemExit(1)
+
+            myprint(f"[=] Submission saved! Filename: {filename}", 10)
+
+    except Exception as e:
+        # general catch
+        myprint(f"[x] Uncaught problem: {e}", 9, True)
+        raise
