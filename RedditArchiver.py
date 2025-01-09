@@ -33,6 +33,7 @@ parser_g2.add_argument('-h', '--help', action='help', help='Show this help messa
 
 # New argument for downloading a subreddit
 parser.add_argument('--download-subreddit', metavar='SUBREDDIT_NAME', help='Download the top 1500 posts from a given subreddit of the past year.')
+parser.add_argument('--download-subreddit-comments', metavar='SUBREDDIT_NAME', help='Download the top 1500 posts with all comments from a given subreddit of the past year.')
 
 # Advanced arguments (normally hidden)
 parser.add_argument('--disable-recursion-limit', help=argparse.SUPPRESS, action='store_true')
@@ -312,7 +313,7 @@ def download_subreddit_posts(reddit, subreddit_name, num_posts=1500):
             if count % 50 == 0:
                 print(f"[i] Downloaded {count}/{num_posts} posts...")
 
-        filename = f"{subreddit_name}_top_{num_posts}_year.json"
+        filename = os.path.join(args.output, f"{subreddit_name}_top_{num_posts}_year.json")
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(posts_data, f, indent=4)
         print(f"[=] Data saved to '{filename}'")
@@ -321,6 +322,63 @@ def download_subreddit_posts(reddit, subreddit_name, num_posts=1500):
         print(f"[x] Subreddit '{subreddit_name}' not found.")
     except Exception as e:
         print(f"[x] An error occurred during subreddit download: {e}")
+
+def download_subreddit_posts_with_comments(reddit, subreddit_name, num_posts=1500):
+    """
+    Downloads the top posts with all comments from a given subreddit for the past year and saves them to a JSON file.
+
+    Args:
+        reddit (praw.Reddit): An authenticated PRAW Reddit instance.
+        subreddit_name (str): The name of the subreddit to download from (e.g., "python").
+        num_posts (int): The number of top posts to download (default is 1500).
+    """
+    try:
+        subreddit = reddit.subreddit(subreddit_name)
+        print(f"[i] Downloading the top {num_posts} posts with comments from r/{subreddit_name} (year)...")
+        posts_data = []
+        count = 0
+        for post in subreddit.top(time_filter='year', limit=num_posts):
+            comments_data = []
+            post.comments.replace_more(limit=None)  # Load all comments
+            for comment in post.comments.list():
+                comment_info = {
+                    "author": str(comment.author),
+                    "body": comment.body,
+                    "score": comment.score,
+                    "created_utc": comment.created_utc,
+                    "permalink": "https://www.reddit.com" + comment.permalink,
+                    "id": comment.id,
+                    "parent_id": comment.parent_id
+                    # Add more attributes if needed
+                }
+                comments_data.append(comment_info)
+
+            post_info = {
+                "title": post.title,
+                "author": str(post.author),
+                "score": post.score,
+                "url": post.url,
+                "created_utc": post.created_utc,
+                "num_comments": post.num_comments,
+                "upvote_ratio": post.upvote_ratio,
+                "id": post.id,
+                "permalink": "https://www.reddit.com" + post.permalink,
+                "comments": comments_data
+            }
+            posts_data.append(post_info)
+            count += 1
+            if count % 10 == 0:
+                print(f"[i] Downloaded {count}/{num_posts} posts with comments...")
+
+        filename = os.path.join(args.output, f"{subreddit_name}_top_{num_posts}_year_with_comments.json")
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(posts_data, f, indent=4)
+        print(f"[=] Data saved to '{filename}'")
+
+    except prawcore.exceptions.NotFound:
+        print(f"[x] Subreddit '{subreddit_name}' not found.")
+    except Exception as e:
+        print(f"[x] An error occurred during subreddit download with comments: {e}")
 
 def myprint(message, color, stderr=False):
     """
@@ -362,6 +420,10 @@ if __name__ == "__main__":
         if args.download_subreddit:
             download_subreddit_posts(reddit, args.download_subreddit)
             sys.exit(0) # Exit after downloading subreddit if that's the only task
+
+        if args.download_subreddit_comments:
+            download_subreddit_posts_with_comments(reddit, args.download_subreddit_comments)
+            sys.exit(0) # Exit after downloading subreddit with comments if that's the only task
 
         now = datetime.datetime.now(datetime.timezone.utc)
         now_str = now.strftime(config["defaults"]["dateformat"])
@@ -433,7 +495,7 @@ if __name__ == "__main__":
 
         # Downloading each submission
         submission_id_list = list(dict.fromkeys(submission_id_list)) # removing duplicates
-        if len(submission_id_list) == 0 and not args.download_subreddit:
+        if len(submission_id_list) == 0 and not (args.download_subreddit or args.download_subreddit_comments):
             myprint(f'[=] Nothing to download.', 10)
             raise SystemExit(0)
         elif len(submission_id_list) > 0:
