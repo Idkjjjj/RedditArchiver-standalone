@@ -49,7 +49,7 @@ python3 RedditArchiver.py \
 - `-a`: Download all the submissions you posted. If you want to include as well the submissions which you posted a comment in, pass `-A` instead.  
   You can also specify a name to download the submissions from another redditor. Here, you will download the submissions posted by you and by u/iamthatis:
 
-- python your_script_name.py --download-subreddit <subreddit_name>
+- python your_script_name.py   --download-subreddit OR --download-subreddit-comments <subreddit_name>
 for top 1000 posts download from a subreddit
 ```bash
 python3 RedditArchiver.py -a -a iamthatis
